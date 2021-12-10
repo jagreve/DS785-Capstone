@@ -1,0 +1,906 @@
+---
+title: "DS785-ComEd RTP"
+author: "Jeff Greve"
+date: "12/5/2021"
+output: html_document
+# 10/5/2021 Initial code to:
+  # extract comed data 1/1/2013 to 08/31/2021
+  # extract csv for Rochelle
+# 11/24/2021 update
+  # processes data fo multiple cities in seperate files
+  # for Galena,IL Rochelle,IL Chicago,IL Rochford,IL Peoria,IL
+  # updated data range to 1/1/2013 to 10/31/2021
+# 11/26/2021 update
+  # added RR and LASSO models, RR with only temp_dd was best
+  # revised graphs
+# 12/5/2021 Update
+  # tortured the data more
+  # added 
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r load libraries, message=FALSE, warning=FALSE}
+
+library(httr)	# for Accessing APIS (HTTP or HTTPS URLS from Web)
+library(rlist) # exposes some additional functions to convert json/text to data frame	
+library(jsonlite) # used to manipulate data	
+library(dplyr) # for improved plotting graphs
+library(ggplot2) # for date plot functions
+library(date)
+library(base) # for assign()
+library(weathermetrics) # fahrenheit to kelvin
+```
+
+```{r ComEd Rate chart}
+
+# ComEd rate chart, RESIDENTIAL TIME OF USE PRICING PILOT pg 694
+# https://www.comed.com/SiteCollectionDocuments/MyAccount/MyBillUsage/CurrentRates/Ratebook.pdf
+# offpeak - 10pm to 6am
+# peak - 6am to 2pm, & 7pm-10pm
+# superpeak - 2pm-7pm
+
+# Residential Time of Use Off Peak Period
+# Residential Time of Use (RTOU) Off Peak Period is the period where energy is measured for billing
+# purposes every day from 10:00 p.m. to 6:00 a.m. Central Prevailing Time (CPT).
+
+# Residential Time of Use Peak Period
+# RTOU Peak Period is the period where energy is measured for billing purposes every day from 6:00
+# a.m. to 2:00 p.m. and from 7:00 p.m. to 10:00 p.m. CPT.
+
+# Residential Time of Use Super Peak Period
+# RTOU Super Peak Period is the period where energy is measured for billing purposes every day from
+# 2:00 p.m. to 7:00 p.m. CPT
+
+# fixed rate price $0.1219/KWH
+
+hour <- seq(0,23) # 24 hours
+
+# Real Time rate periods
+rate <- rep(0,24)
+rate[1:6] <- 0
+rate[7:14] <- 1
+rate[15:19] <- 2
+rate[20:22] <- 1
+rate[23:24] <- 0
+
+ratename <- vector()
+ratename[1:6] <- 'offpeak'
+ratename[7:14] <- 'peak'
+ratename[15:19] <- 'superpeak'
+ratename[20:22] <- 'peak'
+ratename[23:24] <- 'offpeak'
+
+# summer rates June, July, August, September
+summer <- c(6,7,8,9)
+winter <- c(1,2,33,4,5,10,11,12)
+
+# for RTOUPP rates see page 694
+# summer rates
+summer_rate <- vector()
+summer_rate[1:6] <- 2.609 
+summer_rate[7:14] <- 4.113
+summer_rate[15:19] <- 14.793
+summer_rate[20:22] <- 4.113
+summer_rate[23:24] <- 2.609
+# winter rates
+winter_rate <- vector()
+winter_rate[1:6] <- 2.987
+winter_rate[7:14] <- 4.667
+winter_rate[15:19] <- 15.877
+winter_rate[20:22] <- 4.667
+winter_rate[23:24] <- 2.987
+
+hourlyrates <- data.frame(hour, rate, ratename, summer_rate, winter_rate)
+#hourlyrates
+remove(hour, rate, ratename, summer_rate, winter_rate) # remove temp vectors
+
+```
+
+```{r weather codes chart for openweathermap.com API}
+# weather_id groups
+# weathercodes based on https://openweathermap.org/weather-conditions#Weather-Condition-Codes-2
+groupid <- c(200,201,202,210,211,212,221,230,231,232, # Thunderstorm group
+             300,301,302,310,311,312,313,314,321,  # Drizzle group
+             500,501,502,503,504,511,520,521,522,531, # Rain Group
+             600,601,602,611,612,613,615,616,620,621,622, # Snow group
+             701,711,721,731,741,751,761,762,771,781,  # Atmosphere group
+             800,801,802,803,804) # Cloud group
+mainid <- vector()
+mainid[1:10] <- 'Thunderstorm'
+mainid[11:19] <- 'Drizzle'
+mainid[20:29] <- 'Rain'
+mainid[30:40] <- 'Snow'
+mainid[41:50] <- c('Mist', 'Smoke', 'Haze', 'Dust', 'Fog', 'Sand', 'Dust', 'Ash', 'Squall', 'Tornado')
+mainid[51] <- 'Clear'
+mainid[52:55] <- c('Clouds')
+descid <- c('thunderstorm with light rain', 'thunderstorm with rain', 'thunderstorm with heavy rain', 'light thunderstorm', 'thunderstorm',
+              'heavy thunderstorm', 'ragged thunderstorm', 'thunderstorm with light drizzle', 'thunderstorm with drizzle', 'thunderstorm with heavy drizzle',
+            'light intensity drizzle', 'drizzle', 'heavy intensity drizzle', 'light intensity drizzle rain', 'drizzle rain', 'heavy intensity drizzle rain', 
+              'shower rain and drizzle', 'heavy shower rain and drizzle', 'shower drizzle',
+            'light rain', 'moderate rain', 'heavy intensity rain', 'very heavy rain', 'extreme rain', 'freezing rain',
+              'light intensity shower rain', 'shower rain', 'heavy intesity shower rain', 'ragged shower rain',
+            'light snow', 'snow', 'heavy snow', 'sleet', 'light shower sleet', 'shower sleet', 'light rain and snow',
+              'rain and snow', 'light shower snow', 'shower snow', 'heavy shower snow',
+            'mist', 'smoke', 'haze', 'sand/dust swirls', 'fog', 'sand', 'dust', 'volcanic ash', 'squalls', 'tornado',
+            'clear sky', 'few clouds:11-25%', 'scattered clouds:25-50%', 'broken clouds:51-84%', 'overcast clouds:85-100%'
+            )
+weathercodes <- data.frame(groupid, mainid, descid)
+# weathercodes
+remove(groupid, mainid, descid) # remove temp vectors
+```
+
+```{r collect data 1/1/2013-10/31/2021 into one dataframe millisUTC & price}
+# read into dataframe the json via jsonlite
+# (https://cran.r-project.org/web/packages/jsonlite/jsonlite.pdf)
+#comedjson1 <- fromJSON("https://hourlypricing.comed.com/api?type=5minutefeed&datestart=201301010000&dateend=202001010000")
+
+# weather data is UTC, while ComEd is local time (UTC+6)
+# 1/01/2021 Midnight UTC to 10/31/2021 midnight UTC
+
+RTPdf <- fromJSON("https://hourlypricing.comed.com/api?type=5minutefeed&datestart=202101010000&dateend=202110311855")
+# add last 6 hours of 2012 to later merge with Weather
+getyear ="https://hourlypricing.comed.com/api?type=5minutefeed&datestart=201212311800&dateend=201301010000"
+nextyear = fromJSON(getyear)
+RTPdf <- union(RTPdf, nextyear) # combine
+i <- 2013
+while (i < 2021) {
+  getyear <-paste("https://hourlypricing.comed.com/api?type=5minutefeed&datestart=", i, "01010000&dateend=", i+1, "01010000", sep="")
+  #print (getyear)
+  nextyear = fromJSON(getyear)
+  RTPdf <- union(RTPdf, nextyear)
+  i = i+1
+}
+
+remove(getyear, i, nextyear) # free space from data reads
+summary(RTPdf)
+```
+
+```{r RTP dataframe post process transform}
+# millisUTC transform to UTC numeric in seconds
+# Price transform to numeric
+RTPdf2 <- transform(RTPdf, dt= (as.numeric(millisUTC)/1000), price=as.numeric(price))
+
+# if filling the NA missing RTP 5 minute intervals do it here
+
+# create 5 minute UTC, join with RTPdf2 
+# arrange as UTC and then price
+RTPdf2 <- subset(RTPdf2, select=c(dt, price))
+# order by UTC
+RTPdf2 <- RTPdf2[order(RTPdf2$dt),]
+# make UTC an hourly not in 45 minute intervals
+RTPdf2$dt <- as.numeric(as.integer(RTPdf2$dt /3600)*3600)
+#summary(RTPdf2)
+
+#UTChr <- unique(RTPdf2$UTChr) # find each unique UTC hour
+library(dplyr)
+# summarize the price by UTC hourA summary applied to ungrouped tbl returns a single row
+RTPtbl <- RTPdf2 %>%
+  group_by(dt) %>%
+  summarise(price_n = n(), price_mean = mean(price), price_median = median(price), price_max = max(price), price_min = min(price))
+#RTPtbl
+
+# if In Python groupby via lambda df2 <- df.groupby('A', as_index=False)['B'].aggregate(lambda x: set(x))
+#df2 = RTPdf2.groupby('UTChr').aggregate(lambda tdf: tdf.tolist())
+#summary(RTPtbl)
+remove(RTPdf, RTPdf2)
+
+```
+
+```{r general functions}
+# https://cran.r-project.org/web/packages/weathermetrics/weathermetrics.pdf
+library(weathermetrics)
+THI <- function(temp_K, humid_pct) {
+  # temp in Kelvin
+  # relative THI(temperature humidity index)
+  # THI =0.8*T + RH*(T-14.4) + 46.4
+  # https://www.pericoli.com/EN/news/120/Temperature-Humidity-Index-what-you-need-to-know-about-it.html
+  temp_C = kelvin.to.celsius(temp_K, round = 0) # 0 Celsius is 273 Kelvin
+  rh = humid_pct/100
+  return (0.8 * (temp_C) + rh * (temp_C - 14.4) + 46.4)
+}
+
+# https://cran.r-project.org/web/packages/weathermetrics/weathermetrics.pdf
+library(weathermetrics)
+degree_day <- function(temp_K, degree_temp = 65) {
+  # Degree day heat/cool relative to degree_temp (default=65 degrees Fahrenheit)
+  # a heating degree day is the temp below degree_temp fahrenheit
+  # a cooling degree day is the temp above degree_temp fahrenheit
+  # Note: 65 degree Fahrenheit = 291.483 kelvin
+  #  return(temp_K - 291) # rounded down
+  return(temp_K - fahrenheit.to.kelvin(degree_temp, round = 0))
+  }
+```
+
+```{r read_weather() - Read the weather dataframe}
+read_weather <- function(site, directory){
+  filetext <- paste(directory, site, ".csv", sep="")
+  if (file.exists(filetext) == FALSE){
+    return(data.frame()) # return empty dataframe
+  }
+  # using csv since simpler to manage, with a cleaner data layout
+  #City <- fromJSON(filetext)
+  City <- read.csv(filetext)
+  
+  # get last char in a string, the day/night indicator
+  City$night <- ifelse(substr(City$weather_icon,3,3) == "n",1,0)
+  
+  # lcl is the local time (CST), origin is Linux start Jan 1, 1970
+  City$lcl <- as.POSIXlt((City$dt), origin = '1970-01-01')
+  #City$lcl_dt <- format(City$dt, tz="America/Chicago",usetz=TRUE)
+  library(lubridate)
+  library(timeDate);library(chron)
+  # use is.weekend(x) and  is.holiday(x, holidays) to determine if a holiday
+  City$year <- year(City$lcl)
+  City$month <- month(City$lcl)
+  #City$day <- day(City$lcl) # not clear, need day granularity
+  City$hour <- hour(City$lcl)
+  #City$weekday <- wday(City$lcl) # possibly redundant, not certain need weekday (1-7)
+  #City$weekend <- is.weekend(City$lcl)
+  City$weekend <- ifelse(is.weekend(City$lcl), 1, 0) # 0 - weekday, 1 - weekend
+  City$doy <- as.numeric(strftime(City$lcl, format = "%j")) # 1-366 day of year
+  
+  # https://stackoverflow.com/questions/7451354/how-to-define-holidays-for-is-holiday-chron-package-in-r
+  # Federal holidays result in shifts in worker telecommuting
+  
+  # listHolidays() # to list all holidays in R
+  # common school and bank holidays in Illinois are:
+  #    newyears, MLK_day, presidents_day, memorial_day, independence_day, labor_day,
+  #    indigenous_peoples_day(Columbus_day, veterans day, thanskgiving day, christmas
+  hlist <- c("USNewYearsDay", "USMLKingsBirthday", "USPresidentsDay", "USMemorialDay","USIndependenceDay","USLaborDay","USColumbusDay","USVeteransDay", "USThanksgivingDay", "USChristmasDay")
+  myholidays  <- dates(as.character(holiday(2013:2021,hlist)),format="Y-M-D")
+  # holiday is TRUE if a US holiday
+  City$holiday <- ifelse(is.holiday(City$lcl, myholidays), 1, 0) # 0 - non-holiday, 1 - holiday
+  #holly <-City[City$holiday ==TRUE,] # list the holiday data
+  remove(hlist, myholidays)
+  return(City) # return the results 
+  }
+```
+
+```{r standardize_weather() - standardize the weather dataframe}
+library(dplyr) # for improved plotting graphs
+
+#Unused libraries
+# https://cran.r-project.org/web/packages/ThermIndex/ThermIndex.pdf
+#library(ThermIndex)
+# https://cran.r-project.org/web/packages/standardize/vignettes/using-standardize.html
+#library(standardize)
+standardize_weather <- function(City){
+  # standardize the weather fields
+  
+  # adjust kelvin temperatures for degree days (degrees above/below 65 degrees fahrenheit)
+  # negative for heating, positive for heating
+  # Heating and cooling degree days closely correlate with heating and cooling demand.
+  City$temp_dd <- degree_day(City$temp)
+  City$feels_like_dd <- degree_day(City$feels_like)
+  City$temp_min_dd <- degree_day(City$temp_min)
+  City$temp_max_dd <- degree_day(City$temp_max)
+  
+  # average barometric pressure for Rochelle, IL is at sea-level is 1,016.25 millibars
+  #mean_pressure = mean(City$pressure)
+  City$pressure_mean0 <- City$pressure - mean(City$pressure)
+  # center average humidity to the mean for the city, mean=77.75 for Rochelle, IL
+  #mean_humidity <- mean(City$humidity)
+  City$humidity_mean0 <- City$humidity - mean(City$humidity)
+  #City$humidex <- humidex(c(City$temp+ 273.15), c(City$humidity))
+  City$thi <- THI(City$temp, City$humidity)
+  City <- City %>%
+    # mitigate the NA to be zero
+    mutate_at(c("rain_1h", "rain_3h", "snow_1h", "snow_3h"), ~replace(., is.na(.), 0)) %>%
+    
+    select(-c("timezone", "city_name", "lat", "lon", "sea_level", "grnd_level", "weather_main", "weather_description", "weather_icon")) %>%
+    # remove extraneous and NA data field
+    # timezone # extra since based on CST
+    # city_name # extra since always  Rochelle, IL
+    # lat # always lat=41.92 for Rochelle, IL
+    # lon # always -89.07 for Rochelle, IL
+    # sea_level # blank
+    # grnd_level # blank
+    # weather_main # redundant with weather_id
+    # weather_description # redundant with weather_id
+    # weather_icon # redundant with weather_id
+
+    select(-c("dt_iso", "temp", "feels_like", "temp_min", "temp_max", "pressure", "humidity"))
+    # remove extra columns
+    # dt - converted to lcl,and saved in local time POSIXlt, removed after the merge
+    # dt_iso - unused, used dt instead
+    # temp - converted to temp_dd (temperature degree days)
+    # feels_like - converted to feels_like_dd (feels like degree days)
+    # temp_min - converted to temp_min_dd (temperature minimum degree days)
+    # temp_max - converted to temp_max_dd (temperature maximum degree days)
+    # pressure - converted to pressure_mean0, normalized
+    # humidity - converted to humidity_mean0, normalized
+
+  return (City) # return updated dataframe
+}  
+```
+
+```{r merge_weather_RTP() merge weather with RTP & hourly rates}
+merge_weather_RTP <- function(City){
+  # merge weather data with RTP hourly rates
+  City <- get(i)
+  # merge weather with hourly rates
+  City <- merge(City, hourlyrates, by="hour")
+  # make a fixed_rate column
+  City$fixed_rate <- 0 # create new column
+  City <- City %>%
+    mutate(
+      fixed_rate = case_when(month %in% c(6,7,8,9) ~ summer_rate,
+          TRUE ~ winter_rate)
+    )
+  City$summer_rate <- NULL
+  City$winter_rate <- NULL
+  
+  City <- City[order(City$dt),]
+  # merge weather with RTP
+  City <- merge(City, RTPtbl, by="dt")
+  City$dt <- NULL # remove since now using local time, NOT GMT
+  
+  # re-arrange the column name order
+  col_order <- c( "lcl", "year", "month", "doy", "hour", "night", "weekend", "holiday",
+                  "weather_id", "clouds_all",
+                  "temp_dd", "feels_like_dd", "temp_min_dd", "temp_max_dd", "pressure_mean0", "humidity_mean0", "thi",
+                  "wind_speed", "wind_deg", "rain_1h", "rain_3h", "snow_1h", "snow_3h",
+                  "rate", "ratename", "fixed_rate",
+                  "price_n", "price_mean", "price_median", "price_max", "price_min")
+  City <- City[, col_order]
+  
+  #summary(City) # for debug
+  return (City) # return updated dataframe
+}
+```
+
+```{r change variables to type factor}
+clean_factor_df <- function(City){
+  
+  # remove duplicate records with different weather_id
+  df <- as_tibble(City)
+  # comment out the next line to keep duplicate weather_id events
+  df <- df %>% distinct(lcl, .keep_all = TRUE)
+  # delete the 6 observations from 2012 resulting from the UTC shift
+  df <- subset(df, year != 2012)
+
+  # Factor variables
+  cols <- c("year", "month", "hour", "night", "weekend", "holiday","weather_id" )
+  df[cols] <- lapply(df[cols], as.factor) # Set all to be factors
+    #site$year # year range 2013-2021
+    #site$month # month range 1-12
+    #site$hour # hour range 0-23
+    #site$night # night, 0 = day, 1 = night
+    #site$weekend # weekend, 0 = weekday, 1 = weekend
+    #site$holiday # holiday, 0 = not_a_holiday, 1 = holiday
+    #site$weather_id # see weathercodes dataframe
+    #site$night # night, 0 = day, 1 = night
+    # write the merged data.frame() to a CSV ".merged.csv", overwite if needed
+    # remove old file if it exists
+  
+  # remove extraneous and fields
+  df <- df %>%
+    select(-c("lcl"))
+    # lcl # extra since a proxy in other date related fields
+  remove (cols)
+  return (df) # return updated dataframe
+}
+```
+
+```{r main loop, message=FALSE, warning=FALSE}
+# global data
+WeatherDir <-"WeatherData/"
+Sites <- list("Rochelle", "Chicago", "Galena", "Peoria", "Rockford")
+
+# for each site read and standardize the data
+for (i in Sites) {
+  # Read the weather csv into a dataframe
+  assign(i, read_weather(i, WeatherDir))
+  # standardize the data
+  assign(i, standardize_weather(get(i)))
+  assign(i, merge_weather_RTP(get(i)))
+  assign(i, clean_factor_df(get(i)))
+  
+  # save the merged data as a CSV
+  merged_csv <- paste(WeatherDir, i, ".merged.csv", sep="")
+  if (file.exists(merged_csv)) {
+    file.remove(merged_csv)
+  }
+  write.csv(i, merged_csv)
+  
+}
+remove(i, merged_csv)
+```
+
+```{r Factor Analysis pearson() compare of price_mean temp_dd, message=FALSE, warning=FALSE}
+# DS705- Factor Analysis
+# cor() - correlation matrix
+# KMO() - Kaiser-Meyer-Olkin (KMO) Measure of adequacy (MSA)KMO(mat)
+
+# change next line for other cities
+df <- Rochelle
+# degree day
+below <- df[df$temp_dd < -10,]
+above <- df[df$temp_dd > 10,]
+dd <- rbind(below,above)
+
+# Pearson's Correlation between mean & median
+cor.test(df$price_mean, df$temp_dd, method = "pearson")
+# Pearson's Correlation between mean & median
+cor.test(dd$price_mean, dd$temp_dd, method = "pearson")
+```
+
+```{r Factor Analysis - KMO(), message=FALSE, warning=FALSE}
+library(psych)
+# change next line for other cities
+df <- Rochelle
+
+# Mediocre - 0.5-0.7
+# Good - 0.7-0.8
+# Great - 0.8-0.9
+# Compare of various price_mean to the linear variables
+# temp, wind_speed, humidity, pressure, clouds, snow, rain, & wind
+
+# to avoid the proxy variables and duplicity
+# ignore price_median, price_n, price_min
+# price_n - since mean is 11.9 ~= 12, each hour has approx 12 samples
+# price_median - 0.93 correlation it is a proxy for price_mean
+#    real-time price is based on the mean price not the median
+# rain_3h & snow_3h - are a proxy for rain_1h & snow_1h so picked smaller duration
+# price_max, price_min - intuitively a proxy for price_mean. Possible use in focus for anomalies
+#mat <- Rochelle[ , c("price_mean", "price_median", "price_max", "price_min", "fixed_rate", "temp_dd", "rain_1h", "snow_1h", "wind_speed", "pressure_mean0", "humidity_mean0", "clouds_all")]
+mat <- df[ , c("price_mean", "fixed_rate", "temp_dd", "rain_1h", "snow_1h", "wind_speed", "pressure_mean0", "humidity_mean0", "clouds_all")]
+as.dist(round(cor(mat),2))
+KMO(mat) # Overall MSA = 0.44
+
+# minor correlations with price_mean ~ 0 were dropped
+# mediocre cross-correlation temp_dd, snow_1h
+mat <- df[ , c("price_mean", "fixed_rate", "rain_1h", "snow_1h", "wind_speed", "pressure_mean0", "humidity_mean0", "clouds_all")]
+KMO(mat) # Overall MSA = 0.52
+
+# drop fixed_rate, mean price insensitive to fixed_price with 0.46
+mat <- df[ , c("price_mean", "rain_1h", "snow_1h", "pressure_mean0", "humidity_mean0", "clouds_all")]
+KMO(mat) # Overall MSA = 0.62
+
+# Overall MSA =  0.62, which is only mediocre.
+# dropping any other variable did NOT improve the Overall MSA
+remove(df, mat)
+```
+
+
+```{r repeat Factor Analysis for abs(temp_dd) > 10, message=FALSE, warning=FALSE}
+# change next line for other cities
+df <- Rochelle
+
+# degree day
+below <- df[df$temp_dd < -10,]
+above <- df[df$temp_dd > 10,]
+dd <- rbind(below,above)
+# Pearson's Correlation between mean & median
+cor.test(dd$price_mean, dd$price_median, method = "pearson")
+
+library(psych)
+# Mediocre - 0.5-0.7
+# Good - 0.7-0.8
+# Great - 0.8-0.9
+# Compare of various price_mean to the linear variables
+# temp, wind_speed, humidity, pressure, clouds, snow, rain, & wind
+
+mat <- dd[ , c("price_mean", "fixed_rate", "temp_dd", "rain_1h", "snow_1h", "wind_speed", "pressure_mean0", "humidity_mean0", "clouds_all")]
+as.dist(round(cor(mat),2))
+KMO(mat) # Overall MSA = 0.46
+
+# minor correlations with price_mean ~ 0 were dropped
+# mediocre cross-correlation temp_dd, snow_1h
+mat <- dd[ , c("price_mean", "fixed_rate", "rain_1h", "snow_1h", "wind_speed", "pressure_mean0", "humidity_mean0", "clouds_all")]
+KMO(mat) # Overall MSA = 0.52 => Mediocre
+
+# drop fixed_rate, mean price insensitive to fixed_price with 0.46
+mat <- dd[ , c("price_mean", "rain_1h", "snow_1h", "pressure_mean0", "humidity_mean0", "clouds_all")]
+KMO(mat) # Overall MSA = 0.64 => Mediocre
+
+# Overall MSA =  0.64, even filtering for degree day more than 10 is still mediocre.
+remove(df,dd, mat)
+```
+
+
+```{r Factor Analysis price_max - KMO() & cor(), message=FALSE, warning=FALSE}
+library(psych)
+# repeat last cell with price_max and price_min
+
+# to avoid proxy variables and duplicity
+# ignore price_mean, price_median, price_n, price_min
+# rain_3h & snow_3h - are a proxy for rain_1h & snow_1h so picked smaller duration
+#mat <- df[ , c("price_mean", "price_median", "price_max", "price_min", "fixed_rate", "temp_dd", "rain_1h", "snow_1h", "wind_speed", "pressure_mean0", "humidity_mean0", "clouds_all")]
+
+# change next line for other cities
+df <- Rochelle
+mat <- df[ , c("price_max", "fixed_rate", "temp_dd", "rain_1h", "snow_1h", "wind_speed", "pressure_mean0", "humidity_mean0", "clouds_all")]
+as.dist(round(cor(mat),2))
+KMO(mat) # Overall MSA = 0.43
+
+# minor correlations ~ 0 dropped 
+# drop temp_dd, wind_speed with < 0.40 correlation
+mat <- df[ , c("price_max", "fixed_rate", "rain_1h", "snow_1h", "pressure_mean0", "humidity_mean0", "clouds_all")]
+KMO(mat) # Overall MSA = 0.52
+
+# drop fixed_rate, max price insensitive to fixed_price with 0.62
+mat <- df[ , c("price_max", "rain_1h", "snow_1h", "pressure_mean0", "humidity_mean0", "clouds_all")]
+KMO(mat) # Overall MSA = 0.62
+
+# Overall MSA =  0.62, which is only mediocre.
+# dropping any other does NOT improve the Overall MSA
+
+mat <- df[ , c("price_min", "fixed_rate", "temp_dd", "rain_1h", "snow_1h", "wind_speed", "pressure_mean0", "humidity_mean0", "clouds_all")]
+as.dist(round(cor(mat),2))
+KMO(mat) # Overall MSA = 0.43
+
+# minor correlations ~ 0 dropped 
+# drop temp_dd, wind_speed with < 0.40 correlation
+mat <- df[ , c("price_min", "fixed_rate", "rain_1h", "snow_1h", "pressure_mean0", "humidity_mean0", "clouds_all")]
+KMO(mat) # Overall MSA = 0.53
+
+# drop fixed_rate, max price insensitive to fixed_price with 0.62
+mat <- df[ , c("price_min", "rain_1h", "snow_1h", "pressure_mean0", "humidity_mean0", "clouds_all")]
+KMO(mat) # Overall MSA = 0.62
+
+# Overall MSA =  0.62, which is only mediocre.
+# dropping any other does NOT improve the Overall MSA
+remove(df, mat)
+```
+
+```{r principal Factor Analysis}
+# DS740 lession 11
+# site dataframe
+# change next line for other cities
+df <- Rochelle
+mat <- df[ , c("price_mean", "fixed_rate", "temp_dd", "rain_1h", "rain_3h","snow_1h", "snow_3h", "thi", "wind_speed", "pressure_mean0", "humidity_mean0", "clouds_all")]
+
+# commonality in H2 column
+# uniqueness in u2 column
+fa.out <- principal(mat,nfactor=5, rotate="varimax") # default rotate="varimax"
+print.psych(fa.out,cut=.5,sort=TRUE)
+#fa.out$scores
+
+# Maximum Likelihood extraction 
+fa.out2 <-factanal(mat, factors=3, rotation="varimax")
+print(fa.out2, cut=.5,sort=TRUE)
+
+remove(fa.out, fa.out2)
+```
+
+```{r function to trim outlier data}
+outliers <- function(df, column, lowerQ, upperQ, rates) {
+  # df - dataframe
+  # column - column to determine the Q and iqr
+  # lowerQ - lower Q limit for outliers
+  # upperQ - upper Q limit for outliers
+  # rates - either 0,1,2  Used to sort each outlier group into subsets
+  
+  # duplicate dataframe df with no data.
+  result = subset(df, FALSE)
+  
+  for (r in rates) {
+    # based on column find the quantile & IQR() 
+    index = (df$rate == r)
+    subcol = column[index] # column for rate x
+    ratex <- df[index,] # dataframe for rate x
+
+    # trim the df data to KEEP only the outlier data
+    Q <- quantile(subcol, prob=c(lowerQ, upperQ), na.rm = FALSE)
+    iqr <- IQR(subcol)
+    up <-  Q[2]+1.5*iqr # Upper Range
+    low <- Q[1]-1.5*iqr # Lower Range
+    ratex <- ratex[(subcol < low | subcol > up),]
+
+    # combine the rates
+    result <- rbind(result, ratex)
+
+  }
+  return (result)
+}
+```
+
+```{r Graphs with rate, price mean, temp degree day}
+# https://cran.r-project.org/web/packages/gridExtra/vignettes/arrangeGrob.html
+library(gridExtra)
+library(grid)
+library(ggplot2)
+library(lattice)
+
+# Sites= "Rochelle", "Chicago", "Galena", "Peoria", "Rockford"
+# change next line for other cities
+site <- "Rochelle"
+df=get(site)
+minQ = 0.499
+maxQ = 0.501
+
+# pearson test on correlation between price_mean & price_median
+cor.test(df$price_mean, df$price_median, method = "pearson")
+
+# filter for temp_dd minQ < Q(degree Day) < maxQ for each rate
+# uncomment the next line to filter based on Q
+outer <- outliers(df, df$temp_dd, minQ, maxQ, c(0,1,2))
+
+# degree day
+below <- df[df$temp_dd < -10,]
+above <- df[df$temp_dd > 10,]
+dd <- rbind(below,above)
+
+# a compare of price_mean to Price_median showed minimal difference
+# price_mean vs hour  (Very nice plot)
+ggplot() +
+  geom_boxplot(data = outer, aes( x = hour, y = price_mean)) + 
+    (aes(color=factor(rate))) + 
+    ggtitle(paste(minQ, " < Q(degree Day) < ", maxQ)) +
+#    ggtitle(paste("Mean Price by hour")) +
+    labs( x = "Hour", y = "Mean Price ($)")
+
+# price_mean vs doy scatter plot
+ggplot() +
+  geom_point(data = outer, aes( x = doy, y = price_mean)) +
+    (aes(color=factor(rate))) +
+    ggtitle(paste(minQ, " < Q(degree Day) < ", maxQ)) +
+#    ggtitle(paste("Mean Price by Day of Year")) +
+    labs( x = "Day of Year", y = "Mean Price ($)")
+
+# temp_dd vs doy scatter plot (ok but box plot better)
+ggplot() +
+  geom_point(data = outer, aes( x = doy, y = temp_dd)) +
+    (aes(color=factor(rate))) +
+    ggtitle(paste(minQ, " < Q(degree Day) < ", maxQ)) +
+#    ggtitle(paste("Degree Days by Day of Year")) +
+    labs( x = "Day of Year", y = "Temperature Degree Day")
+
+# temp_dd vs rate box plot (good plot)
+ggplot() +
+  geom_boxplot(data = outer, aes( x = rate, y = temp_dd)) +
+    (aes(color=factor(rate))) +
+    ggtitle(paste(minQ, " < Q(degree Day) < ", maxQ)) +
+#    ggtitle(paste("Degree Days by Rate")) +
+    labs( x = "Rate", y = "Temperature Degree Day")
+
+# price_mean vs month box plot (good plot)
+ggplot() +
+  geom_boxplot(data = df, aes( x = month, y = price_mean)) +
+    (aes(color=factor(rate))) +
+#    ggtitle(paste("Mean Price by Month")) +
+    labs( x = "Month", y = "Mean Price ($)")
+
+# Northern Illinois weather extremes
+# 2013-2014 winter: the third coldest on record, 23 days of subzero. (polar vortex)
+# Dec 2017: 12 days below 20 degree
+# Jan 2019: 3 days minus 23 degree
+# summer 2020: average 76.7 degree
+# a heat wave is 3 days at > 90 degrees
+# < 4 heat waves each year since 2012
+# price_mean vs year scatter plot (2 star plot)
+ggplot() +
+  geom_point(data = df, aes( x = year, y = price_mean)) +
+    (aes(color=factor(rate))) +
+#    ggtitle(paste("Mean Price by Year")) +
+    labs( x = "Year", y = "Mean Price ($)")
+
+# temp_dd vs month box plot (5 star plot)
+ggplot() +
+  geom_boxplot(data = df, aes( x = month, y = temp_dd)) +
+    (aes(color=factor(rate))) +
+#    ggtitle(paste("Degree Days by Month")) +
+    labs( x = "Month", y = "Temperature Degree Day")
+
+# price_mean vs year box plot (5 star plot)
+ggplot() +
+  geom_boxplot(data = outer, aes( x = year, y = price_mean)) +
+    (aes(color=factor(rate))) +
+    ggtitle(paste(minQ, " < Q(degree Day) < ", maxQ)) +
+#    ggtitle(paste("Mean Price by Year")) +
+    labs( x = "Year", y = "Mean Price ($)")
+
+# price_mean vs year box plot (4 star plot, Figure 2)
+ggplot() +
+  geom_boxplot(data = dd, aes( x = year, y = price_mean)) +
+    (aes(color=factor(rate))) +
+  geom_boxplot(data = dd, aes( x = year, y = price_mean)) +
+    (aes(color=factor(rate))) +
+#    ggtitle(paste("Mean Price by Year\n abs(Degree Day) > 10")) +
+    labs( x = "Year", y = "Mean Price ($)")
+
+# price_mean vs temp_dd scatter plot (flawed plot due to overlay of colors, Figure 3)
+ggplot() +
+  geom_point(data = df, aes( x = temp_dd, y = price_mean)) +
+    (aes(color=factor(rate), shape=factor(weekend))) +
+#    ggtitle(paste("Mean Price by Degree Day")) +
+    labs( x = "Temperature Degree Day", y = "Mean Price ($)")
+
+# price_mean vs this box plot (flawed plot due to overlay of colors)
+ggplot() +
+  scale_shape_identity() +
+  geom_point(data = df, aes( x = thi, y = price_mean)) +
+    (aes(color=factor(rate))) +
+#    ggtitle(paste("Mean Price by Temp-Humidity Indicator")) +
+    labs( x = "Temperature Humidity Index", y = "Mean Price ($)")
+
+# gem-Text dataframe reference
+annotations <- data.frame(
+        xpos = c(Inf), ypos =  c(Inf), annotateText = c("Q +/- 0.005"),
+        hjustvar = c(1), vjustvar = c(1)) #<- adjust from corner
+
+# price_mean vs temp_dd box plot (3.5 star plot, flawed)
+ggplot() +
+  scale_shape_identity() +
+  geom_point(data = df, aes( x = temp_dd, y = price_mean)) +
+    (aes(color=factor(rate))) +
+#  facet_wrap(~ rate) +
+#    ggtitle(paste(minQ, " < Q(degree Day) < ", maxQ)) +
+#    ggtitle(paste("Mean Price by Temp-Humidity Indicator")) +
+  labs( x = "Temperature Degree Day", y = "Mean Price ($)")
+
+# price_mean vs temp_dd box plot (5 star plot, Figure 4)
+ggplot() +
+  scale_shape_identity() +
+  geom_point(data = df, aes( x = temp_dd, y = price_mean)) +
+    (aes(color=factor(rate))) +
+  facet_wrap(~ rate) +
+ #   ggtitle(paste(minQ, " < Q(degree Day) < ", maxQ)) +
+#    ggtitle(paste("Mean Price by Temp-Humidity Indicator")) +
+  labs( x = "Temperature Degree Day", y = "Mean Price ($)")
+
+# geom-text dataframe reference (adds a box inside the plot)
+annotations <- data.frame(
+        xpos = c(Inf), ypos =  c(Inf), annotateText = c("Q +/- 0.005"),
+        hjustvar = c(1), vjustvar = c(1)) #<- adjust from corner
+#  + geom_text(data=annotations, aes(x=xpos, y=ypos, hjust=hjustvar, vjust=vjustvar,label=annotateText))
+
+remove(site, df, outer, dd, above, below, minQ, maxQ, annotations)
+```
+
+```{r data for linear models}
+# open data 
+rtp <- Rochelle
+
+# filter for temp_dd 0.495 < Q < 0.505 for each rate
+# uncomment the next line to filter based on Q
+#rtp <- outliers(rtp, rtp$temp_dd, 0.495, 0.505, c(0,1,2))
+
+#dim(rtp) # 77116 30
+n = dim(rtp)[1] # num of rows
+#names(rtp)
+
+# specify models to consider
+#model list specification
+# from factor analysis
+# RC1 - temp_dd+thi
+# RC2 - humidity_mean0-fixed_rate
+# RC3 - wind_speed+clouds_all-pressure_mean0
+# RC4 - snow_3h+snow_1h
+# RC5 - rain_3h+rain_1h
+
+# best model 12, RR with only temp_dd
+LinModel1 = (price_mean ~ temp_dd)
+LinModel2 = (price_mean ~ temp_dd+thi)
+LinModel3 = (price_mean ~ temp_dd+thi+humidity_mean0)
+LinModel4 = (price_mean ~ temp_dd+thi+humidity_mean0+fixed_rate)
+LinModel5 = (price_mean ~ temp_dd+thi+humidity_mean0+fixed_rate+wind_speed)
+LinModel6 = (price_mean ~ temp_dd+thi+humidity_mean0+fixed_rate+wind_speed +clouds_all)
+LinModel7 = (price_mean ~ temp_dd+thi+humidity_mean0+fixed_rate+wind_speed +clouds_all+pressure_mean0)
+LinModel8 = (price_mean ~ temp_dd+thi+humidity_mean0+fixed_rate+wind_speed +clouds_all+pressure_mean0+snow_3h)
+LinModel9 = (price_mean ~ temp_dd+thi+humidity_mean0+fixed_rate+wind_speed +clouds_all+pressure_mean0+snow_3h+snow_1h)
+LinModel10 = (price_mean ~ temp_dd+thi+humidity_mean0+fixed_rate+wind_speed +clouds_all+pressure_mean0+snow_3h+snow_1h+rain_3h)
+allLinModels = list(LinModel1,LinModel2,LinModel3,LinModel4,LinModel5,LinModel6,LinModel7,LinModel8,LinModel9,LinModel10)
+
+nLinmodels = length(allLinModels)
+
+library(glmnet)  # use RR and LASSO modeling commands from package glmnet 
+# RR model specification and number
+lambdalistRR = c(0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1)  # specifies RR models to consider
+nRRmodels = length(lambdalistRR)
+# LASSO model specification and number
+lambdalistLASSO = c(0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1)  # specifies LASSO models to consider
+nLASSOmodels = length(lambdalistLASSO)
+
+nmodels = nLinmodels+nRRmodels+nLASSOmodels
+
+#specify the data set used to perform the model selection
+fulldata.in = rtp
+# set seed for randomizing CV fold selection
+set.seed(8)
+
+###########################
+## Full modeling process ##
+###########################
+
+# we begin setting up the model-fitting process to use notation that will be
+# useful later, "in"side a validation
+n.in = dim(fulldata.in)[1] # number of rows
+# Include onlty the model data columns
+x.in = model.matrix(price_mean~.,data=fulldata.in)[,c("temp_dd","thi","humidity_mean0","fixed_rate","wind_speed","clouds_all","pressure_mean0","snow_3h","snow_1h", "rain_3h","rain_1h")]
+# y.in must be typeof double()
+y.in = simplify2array(fulldata.in[,"price_mean"])
+# number folds and groups for (inner) cross-validation for model-selection
+k.in = 10 
+
+#produce list of group labels
+groups.in = c(rep(1:k.in,floor(n.in/k.in)))
+if(floor(n.in/k.in) != (n.in/k.in)) groups.in = c(groups.in, 1:(n.in%%k.in))
+cvgroups.in = sample(groups.in,n.in)  #orders randomly, with seed (8) 
+#table(cvgroups.in)  # check correct distribution
+allmodelCV.in = rep(NA,nmodels) #place-holder for results
+
+#####################################################################
+##### cross-validation for model selection ##### reference - Lesson 2
+
+# since linear regression does not have any automatic CV output,
+# set up storage for predicted values from the CV splits, across all linear models
+allpredictedCV.in = matrix(rep(NA,n.in*nLinmodels),ncol=nLinmodels)
+
+#cycle through all folds:  fit the model to training data, predict test data,
+# and store the (cross-validated) predicted values
+for (i in 1:k.in)  {
+  train.in = (cvgroups.in != i)
+  test.in = (cvgroups.in == i)
+  #fit each of the linear regression models on training, and predict the test
+  for (m in 1:nLinmodels) {
+    lmfitCV.in = lm(formula = allLinModels[[m]],data=rtp,subset=train.in)
+    allpredictedCV.in[test.in,m] = predict.lm(lmfitCV.in,fulldata.in[test.in,])
+  }
+}
+# compute and store the CV(10) values
+for (m in 1:nLinmodels) { 
+  allmodelCV.in[m] = mean((allpredictedCV.in[,m]-fulldata.in$price_mean)^2)
+}
+
+#####################################################################
+##### cross-validation for model selection ##### reference - Lesson 5
+# RR cross-validation - uses internal cross-validation function
+cvRRglm.in = cv.glmnet(x.in, y.in, lambda=lambdalistRR, alpha = 0, nfolds=k.in, foldid=cvgroups.in)
+
+# LASSO cross-validation - uses internal cross-validation function
+# Least absolute shrinkage and selection operator (LASSO)
+cvLASSOglm.in = cv.glmnet(x.in, y.in, lambda=lambdalistLASSO, alpha = 1, nfolds=k.in, foldid=cvgroups.in)
+
+# store CV(10) values, in same numeric order as lambda, in storage spots for CV values
+allmodelCV.in[(1:nRRmodels)+nLinmodels] = cvRRglm.in$cvm[order(cvRRglm.in$lambda)]
+# store CV(10) values, in same numeric order as lambda, in storage spots for CV values
+allmodelCV.in[(1:nLASSOmodels)+nRRmodels+nLinmodels] = cvLASSOglm.in$cvm[order(cvLASSOglm.in$lambda)]
+# visualize CV(10) values across all methods
+plot(allmodelCV.in,pch=20); abline(v=c(nLinmodels+.5,nLinmodels+nRRmodels+.5))
+
+bestmodel.in = (1:nmodels)[order(allmodelCV.in)[1]]  # actual selection
+# state which is best model and minimum CV(10) value
+bestmodel.in; min(allmodelCV.in)
+
+### finally, fit the best model to the full (available) data ###
+if (bestmodel.in <= nLinmodels) {  # then best is one of linear models
+  bestfit = lm(formula = allLinModels[[bestmodel.in]],data=fulldata.in)  # fit on all available data
+  bestcoef = coef(bestfit)
+} else if (bestmodel.in <= nRRmodels+nLinmodels) {  # then best is one of RR models
+  bestlambdaRR = (lambdalistRR)[bestmodel.in-nLinmodels]
+  bestfit = glmnet(x.in, y.in, alpha = 0,lambda=lambdalistRR)  # fit the model across possible lambda
+  bestcoef = coef(bestfit, s = bestlambdaRR) # coefficients for the best model fit
+} else {  # then best is one of LASSO models
+  bestlambdaLASSO = (lambdalistLASSO)[bestmodel.in-nLinmodels-nRRmodels]
+  bestfit = glmnet(x.in, y.in, alpha = 1,lambda=lambdalistLASSO)  # fit the model across possible lambda
+  bestcoef = coef(bestfit, s = bestlambdaLASSO) # coefficients for the best model fit
+}
+
+#############################
+## End of modeling process ##
+#############################
+
+# summary of best model selected
+selectmodelsummary = list(selectmodel = bestmodel.in, selectfit = bestfit, 
+                        selectcoef = bestcoef)
+selectmodelsummary  # in order to recall the final selected fit after any validation
+
+remove(rtp, n)
+```
+```{r find coefficients for linear model 5}
+print(allmodelCV.in)
+bestmodel.in <- 5
+bestfit = lm(formula = allLinModels[[bestmodel.in]],data=fulldata.in)  # fit on all available data
+bestcoef = coef(bestfit)
+
+# summary of best model selected
+selectmodelsummary = list(selectmodel = bestmodel.in, selectfit = bestfit, 
+                        selectcoef = bestcoef)
+selectmodelsummary  # in order to recall the final selected fit after any validation
+
+```
