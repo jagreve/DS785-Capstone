@@ -1,5 +1,9 @@
 # DS785-Capstone
-Final code for DS785 Capstone to Project on
+Title: Weather Predictors of Real-Time Electricity Pricing
+Author: Jeff Greve
+Date: Dec 10,2021
+
+Final code for the DS785 Capstone Project  written in R
 - Analysis of real time price data from ComEd
 - compared to historic weather data for five cities
 
